@@ -9,106 +9,108 @@
   beamPackages,
   rsync,
   nodejs,
-}: let
+}:
+let
   inherit (builtins) fromTOML readFile;
-in {
-  buildGleamApplication = {
-    src,
-    nativeBuildInputs ? [],
-    localPackages ? [],
-    erlangPackage ? erlang,
-    rebar3Package ? rebar3,
-    ...
-  } @ attrs: let
-    # gleam.toml contains an application name and version.
-    gleamToml = fromTOML (readFile (src + "/gleam.toml"));
+in
+{
+  buildGleamApplication =
+    {
+      src,
+      nativeBuildInputs ? [ ],
+      localPackages ? [ ],
+      erlangPackage ? erlang,
+      rebar3Package ? rebar3,
+      ...
+    }@attrs:
+    let
+      # gleam.toml contains an application name and version.
+      gleamToml = fromTOML (readFile (src + "/gleam.toml"));
 
-    # manifest.toml contains a list of required packages including a sha256 checksum
-    # that can be used by nix fetchHex fetcher.
-    manifestToml = fromTOML (readFile (src + "/manifest.toml"));
+      # manifest.toml contains a list of required packages including a sha256 checksum
+      # that can be used by nix fetchHex fetcher.
+      manifestToml = fromTOML (readFile (src + "/manifest.toml"));
 
-    # Specify which target to build for.
-    buildTarget = attrs.target or gleamToml.target or "erlang";
+      # Specify which target to build for.
+      buildTarget = attrs.target or gleamToml.target or "erlang";
 
-    # Generates a packages.toml expected by gleam compiler.
-    packagesTOML = with lib;
-      concatStringsSep "\n" (
-        ["[packages]"]
-        ++ (map
-          (p: "${p.name} = \"${p.version}\"")
-          manifestToml.packages)
-      );
+      # Generates a packages.toml expected by gleam compiler.
+      packagesTOML =
+        with lib;
+        concatStringsSep "\n" (
+          [ "[packages]" ] ++ (map (p: "${p.name} = \"${p.version}\"") manifestToml.packages)
+        );
 
-    # Helper function to filter manifest.toml packages
-    filterPackagesBySource = type: packages: lib.lists.filter (p: p.source == type) packages;
+      # Helper function to filter manifest.toml packages
+      filterPackagesBySource = type: packages: lib.lists.filter (p: p.source == type) packages;
 
-    # Fetch all dependencies
-    depsDerivs =
-      map
-      (p: {
+      # Fetch all dependencies
+      depsDerivs = map (p: {
         name = p.name;
         derivation = fetchHex {
           inherit (p) version;
           pkg = p.name;
           sha256 = p.outer_checksum;
         };
-      })
-      (filterPackagesBySource "hex" manifestToml.packages);
+      }) (filterPackagesBySource "hex" manifestToml.packages);
 
-    # Find replacement paths for `local` package dependencies
-    # from `localPackages` list.
-    localDeps = let
-      # Build a lookup attrset for local packages.
-      localDerivs = lib.mergeAttrsList (map (
-          p: let
-            name = (fromTOML (readFile (p + "/gleam.toml"))).name;
-          in {
-            "${name}" = p;
-          }
-        )
-        localPackages);
-    in
-      map (
-        p: {
+      # Find replacement paths for `local` package dependencies
+      # from `localPackages` list.
+      localDeps =
+        let
+          # Build a lookup attrset for local packages.
+          localDerivs = lib.mergeAttrsList (
+            map (
+              p:
+              let
+                name = (fromTOML (readFile (p + "/gleam.toml"))).name;
+              in
+              {
+                "${name}" = p;
+              }
+            ) localPackages
+          );
+        in
+        map (p: {
           inherit (p) name path;
           newPath =
-            if localDerivs ? "${p.name}"
-            then localDerivs.${p.name}
-            else builtins.throw "Local dependency \"${p.name}\" not found in `localPackages`.";
-        }
-      ) (filterPackagesBySource "local" manifestToml.packages);
+            if localDerivs ? "${p.name}" then
+              localDerivs.${p.name}
+            else
+              builtins.throw "Local dependency \"${p.name}\" not found in `localPackages`.";
+        }) (filterPackagesBySource "local" manifestToml.packages);
 
-    # Check if elixir is needed in nativeBuildInputs by checking if "mix" is in
-    # required build_tools.
-    isElixirProject = with lib; p: any (t: t == "mix") p.build_tools;
-    needsElixir = with lib; any isElixirProject manifestToml.packages;
+      # Check if elixir is needed in nativeBuildInputs by checking if "mix" is in
+      # required build_tools.
+      isElixirProject = with lib; p: any (t: t == "mix") p.build_tools;
+      needsElixir = with lib; any isElixirProject manifestToml.packages;
 
-    # nativeBuildInputs needed for both targets.
-    defaultNativeBuildInputs = [gleam beamPackages.hex rsync];
-  in
+      # nativeBuildInputs needed for both targets.
+      defaultNativeBuildInputs = [
+        gleam
+        beamPackages.hex
+        rsync
+      ];
+    in
     # Base common mkDerivation attributes
-    stdenv.mkDerivation (attrs
+    stdenv.mkDerivation (
+      attrs
       // {
         pname = attrs.pname or gleamToml.name;
         version = attrs.version or gleamToml.version;
 
         src = lib.cleanSource attrs.src;
 
-        postPatch =
-          lib.concatMapStringsSep "\n" (
-            p: ''
-              sed -i -e 's|${p.path}|${p.newPath}|g' manifest.toml
-              sed -i -e 's|${p.path}|${p.newPath}|g' gleam.toml
-            ''
-          )
-          localDeps;
+        postPatch = lib.concatMapStringsSep "\n" (p: ''
+          sed -i -e 's|${p.path}|${p.newPath}|g' manifest.toml
+          sed -i -e 's|${p.path}|${p.newPath}|g' gleam.toml
+        '') localDeps;
 
         # Here we must copy the dependencies into the right spot and
         # create a packages.toml file so the gleam compiler does not
         # attempt to pull the dependencies from the internet.
         configurePhase =
-          attrs.configurePhase
-          or ''
+          attrs.configurePhase or ''
             runHook preConfigure
 
             mkdir -p build/packages
@@ -136,19 +138,21 @@ in {
       // lib.optionalAttrs (buildTarget == "erlang") {
         nativeBuildInputs =
           defaultNativeBuildInputs
-          ++ [erlangPackage rebar3Package]
-          ++ (lib.optional needsElixir [elixir])
+          ++ [
+            erlangPackage
+            rebar3Package
+          ]
+          ++ (lib.optional needsElixir [ elixir ])
           ++ nativeBuildInputs;
 
         # The gleam compiler has a nice export function for erlang shipment.
         buildPhase =
-          attrs.buildPhase
-          or ''
+          attrs.buildPhase or ''
             runHook prebuild
 
             export REBAR_CACHE_DIR="$TMP/.rebar-cache"
 
-            gleam export erlang-shipment
+            DEBUG=1 DIAGNOSTIC=1 gleam export erlang-shipment
 
             runHook postBuild
           '';
@@ -156,8 +160,7 @@ in {
         # Install all built packages into lib and create an entrypoint script
         # that starts the application.
         installPhase =
-          attrs.installPhase
-          or ''
+          attrs.installPhase or ''
             runHook preInstall
 
             mkdir -p $out/{bin,lib}
@@ -183,8 +186,7 @@ in {
 
         # The gleam compiler doesn't provide an export mechanism for javascript target.
         buildPhase =
-          attrs.buildPhase
-          or ''
+          attrs.buildPhase or ''
             runHook prebuild
 
             gleam build --target javascript
@@ -195,8 +197,7 @@ in {
         # Install all built packages into lib and create an entrypoint script
         # that starts the application.
         installPhase =
-          attrs.installPhase
-          or ''
+          attrs.installPhase or ''
             runHook preInstall
 
             mkdir -p $out/{bin,lib}
@@ -216,5 +217,6 @@ in {
 
             runHook postInstall
           '';
-      });
+      }
+    );
 }
